@@ -7,6 +7,7 @@ import { Avatar, Empty } from "./ui";
 import { IClose, IHeart, ISendF } from "../icons";
 
 /* ================= 选集 ================= */
+/** @brief 展示带当前集标记的完整选集列表。@param props 剧集、选择回调和面板布局。@return 选集面板。 */
 export function EpisodesPanel({ videoId, episodes, current, onPick, onClose, bare = false }: {
   videoId: number; episodes: Episode[]; current: number; onPick: (ep: number) => void; onClose: () => void;
   /** 嵌在双栏抽屉里时，隐藏自带的标题栏与底注 */
@@ -34,7 +35,7 @@ export function EpisodesPanel({ videoId, episodes, current, onPick, onClose, bar
       <div className="flex-1 scroll-y px-4 pb-4">
         <div className="grid grid-cols-4 gap-2">
           {list.map((e) => (
-            <button key={e.ep_num} onClick={() => onPick(e.ep_num)}
+            <button key={e.ep_num} onClick={() => onPick(e.ep_num)} aria-label={`第 ${e.ep_num} 集`} aria-pressed={e.ep_num === current}
               className={`h-10 rounded-(--r-sm) text-[12px] font-semibold pressable ${e.ep_num === current ? "bg-primary text-on-primary" : "bg-s3 text-on/80"}`}>
               {e.ep_num}
             </button>

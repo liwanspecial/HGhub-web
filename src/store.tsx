@@ -1,7 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, platform as envPlatform } from "./api";
 import { isStrictSecurity, setStrictSecurity as setHtmlStrictSecurity } from "./html";
-import type { User } from "./types";
+import type { Detail, User } from "./types";
+import { isNative } from "./runtime";
+import { normalizeHistory, snapshotVideo, rememberVideo as mergeVideo, readView, VIEW_KEY,
+  type LibraryTab, type VideoLibrary, type WatchProgress } from "./libraryState";
+export type { WatchProgress } from "./libraryState";
 
 export type Platform = "android" | "ios" | "windows" | "macos";
 export type Theme = "dark" | "light";
@@ -39,10 +43,8 @@ export type PageInput =
 
 export type Toast = { id: number; msg: string; icon?: "ok" | "heart" | "star" | "info" };
 
-/** 观看记录：看到第几集、第几秒（`dur` 用来判断是否已看完） */
-export type WatchProgress = { id: number; ep: number; t: number; dur: number; at: number };
-
 type Persist = {
+  library: VideoLibrary;
   likes: number[];
   favs: number[];
   history: WatchProgress[];
@@ -55,27 +57,12 @@ type Persist = {
 
 const LS = "hghub_app_v1";
 const DEFAULTS: Persist = {
+  library: {},
   likes: [], favs: [], history: [], follows: [],
   muted: true, muteOnStartup: true, volume: 0.7, searchHist: [],
 };
 
-/** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
-function normalizeHistory(raw: unknown): WatchProgress[] {
-  if (!Array.isArray(raw)) return [];
-  const out: WatchProgress[] = [];
-  raw.forEach((item, i) => {
-    if (typeof item === "number") {
-      out.push({ id: item, ep: 1, t: 0, dur: 0, at: Date.now() - i });
-      return;
-    }
-    const h = item as Partial<WatchProgress> | null;
-    if (h && typeof h.id === "number") {
-      out.push({ id: h.id, ep: Number(h.ep) || 1, t: Number(h.t) || 0, dur: Number(h.dur) || 0, at: Number(h.at) || Date.now() - i });
-    }
-  });
-  return out;
-}
-
+/** @brief 读取并兼容已有本机记录。@return 校验过的偏好、历史与展示缓存。 */
 function loadPersist(): Persist {
   try {
     const raw = localStorage.getItem(LS);
@@ -83,9 +70,30 @@ function loadPersist(): Persist {
     const p = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Persist>) };
     // 只在启动时应用；本次使用中取消静音不会关闭此偏好。
     const muteOnStartup = p.muteOnStartup !== false;
-    return { ...p, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
+    const library: VideoLibrary = {};
+    if (p.library && typeof p.library === "object") {
+      Object.values(p.library).slice(0, 120).forEach((entry) => {
+        const snapshot = snapshotVideo(entry, entry?.cached_at ?? 0);
+        if (snapshot) library[snapshot.id] = snapshot;
+      });
+    }
+    const ids = (value: unknown): number[] => Array.isArray(value) ? value.filter((id) => Number.isSafeInteger(id) && id > 0) : [];
+    return { library, likes: ids(p.likes), favs: ids(p.favs), follows: ids(p.follows),
+      muteOnStartup, muted: muteOnStartup || p.muted === true,
+      volume: Number.isFinite(p.volume) ? Math.max(0, Math.min(1, p.volume)) : .7,
+      searchHist: Array.isArray(p.searchHist) ? p.searchHist.filter((s) => typeof s === "string").slice(0, 12) : [],
+      history: normalizeHistory(p.history) };
   } catch {
     return DEFAULTS;
+  }
+}
+
+/** @brief 同步保存用户操作，缓存超限时优先保留观看记录。@param value 本机状态。@return 保存是否成功。 */
+function writePersist(value: Persist): boolean {
+  try { localStorage.setItem(LS, JSON.stringify(value)); return true; }
+  catch {
+    try { localStorage.setItem(LS, JSON.stringify({ ...value, library: {} })); return true; }
+    catch { return false; }
   }
 }
 
@@ -103,6 +111,10 @@ function applyTheme(theme: Theme) {
 }
 
 type Store = {
+  library: VideoLibrary; rememberVideo: (detail: Detail) => void;
+  libraryTab: LibraryTab; setLibraryTab: (tab: LibraryTab) => void;
+  rememberPlayback: (id: number, ep: number, scope: string) => void;
+  storageError: boolean;
   platform: Platform;
   theme: Theme; setTheme: (t: Theme) => void;
   tab: Tab; setTab: (t: Tab) => void;
@@ -132,11 +144,35 @@ const Ctx = createContext<Store>(null as unknown as Store);
 export const useStore = () => useContext(Ctx);
 let seq = 0;
 
+/** @brief 管理本机记录和网页刷新恢复位置。@param children 应用内容。@return 状态提供器。 */
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [p, setP] = useState<Persist>(loadPersist);
+  const [p, setPersistState] = useState<Persist>(loadPersist);
+  const persistRef = useRef(p);
+  const [storageError, setStorageError] = useState(false);
+  const setP = useCallback((update: React.SetStateAction<Persist>) => {
+    const next = typeof update === "function" ? update(persistRef.current) : update;
+    if (next === persistRef.current) return;
+    persistRef.current = next;
+    setStorageError(!writePersist(next));
+    setPersistState(next);
+  }, []);
+  const [restored] = useState(() => {
+    try { return readView(isNative ? null : sessionStorage.getItem(VIEW_KEY)); }
+    catch { return readView(null); }
+  });
   const [theme, setThemeState] = useState<Theme>(readTheme);
-  const [tab, setTabRaw] = useState<Tab>("home");
-  const [stack, setStack] = useState<Page[]>([]);
+  const [tab, setTabRaw] = useState<Tab>(restored.tab);
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>(restored.libraryTab);
+  const [stack, setStack] = useState<Page[]>(() => {
+    if (!restored.watch) return [];
+    const { id, ep } = restored.watch;
+    const progress = p.history.find((entry) => entry.id === id && entry.ep === ep);
+    return [{ kind: "feed", key: "restored-watch", videoIds: [id], index: 0, title: p.library[id]?.title || "继续观看",
+      source: "restore", startEp: ep, startTime: progress?.t }];
+  });
+  const [lastWatch, setLastWatch] = useState<{ id: number; ep: number; scope: string } | null>(
+    restored.watch ? { ...restored.watch, scope: "restored-watch" } : null,
+  );
   const [user, setUser] = useState<User | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -154,8 +190,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [theme]);
 
   useEffect(() => {
-    try { localStorage.setItem(LS, JSON.stringify(p)); } catch { /* ignore */ }
-  }, [p]);
+    if (isNative) return;
+    const page = stack[stack.length - 1];
+    const scope = page?.kind === "feed" ? page.key : !page && tab === "home" ? "home" : null;
+    const watch = scope && lastWatch?.scope === scope ? { id: lastWatch.id, ep: lastWatch.ep }
+      : page?.kind === "feed" ? { id: page.videoIds[page.index], ep: page.startEp || 1 } : undefined;
+    try { sessionStorage.setItem(VIEW_KEY, JSON.stringify({ tab, libraryTab, watch })); } catch { /* 本地记录单独保留。 */ }
+  }, [tab, stack, libraryTab, lastWatch]);
+
+  /** @brief 保存用于刷新恢复的剧集位置。@param id 剧集。@param ep 集数。@param scope 页面标识。@return 无。 */
+  const rememberPlayback = useCallback((id: number, ep: number, scope: string) => {
+    setLastWatch((previous) => previous?.id === id && previous.ep === ep && previous.scope === scope ? previous : { id, ep, scope });
+  }, []);
+  /** @brief 缓存展示资料的白名单字段。@param detail 剧集详情。@return 无。 */
+  const cacheVideo = useCallback((detail: Detail) => {
+    setP((state) => { const library = mergeVideo(state.library, detail); return library === state.library ? state : { ...state, library }; });
+  }, [setP]);
 
   useEffect(() => {
     api.boot()
@@ -234,7 +284,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return { ...s, history: [entry, ...s.history.filter((x) => x.id !== id)].slice(0, 80) };
     });
   }, []);
-  const clearHistory = useCallback(() => setP((s) => ({ ...s, history: [] })), []);
+  const clearHistory = useCallback(() => setP((s) => ({ ...s, history: [],
+    library: Object.fromEntries(Object.entries(s.library).filter(([id]) => s.favs.includes(Number(id)))) })), [setP]);
   const addSearch = useCallback((q: string) => {
     const t = q.trim();
     if (!t) return;
@@ -268,6 +319,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo<Store>(() => ({
+    library: p.library, rememberVideo: cacheVideo, libraryTab, setLibraryTab, rememberPlayback, storageError,
     platform: envPlatform,
     theme, setTheme: setThemeState,
     tab, setTab, stack, push, pop,
@@ -281,7 +333,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast,
-  }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
+  }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout, cacheVideo, libraryTab, rememberPlayback, storageError,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setMuteOnStartup, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, theater, setTheater, fs, setFs]);

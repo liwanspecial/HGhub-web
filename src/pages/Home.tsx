@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Feed from "../components/Feed";
 import { api } from "../api";
 import type { VideoCard } from "../types";
@@ -6,6 +6,7 @@ import { useStore } from "../store";
 import { ISearch } from "../icons";
 import { Empty } from "../components/ui";
 
+/** @brief 仅在首页可见时加载推荐列表。@param props 可见性和底部留白。@return 推荐播放页。 */
 export default function Home({ active, bottomInset }: { active: boolean; bottomInset: number }) {
   const { toast } = useStore();
   const [items, setItems] = useState<VideoCard[]>([]);
@@ -39,9 +40,9 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
     }
   }, [done, toast]);
 
-  useEffect(() => { if (!items.length) load(1); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { if (active && !items.length && !done) load(1); /* eslint-disable-next-line */ }, [active]);
 
-  const ids = items.map((v) => v.id);
+  const ids = useMemo(() => items.map((v) => v.id), [items]);
 
   return (
     <div className="absolute inset-0 bg-black">

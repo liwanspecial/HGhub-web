@@ -27,22 +27,31 @@ type Props = {
   /** 从观看记录续播：起始集数与秒数 */
   startEp?: number;
   startTime?: number;
+  /** 刷新恢复时区分首页与独立播放页。 */
+  navigationKey?: string;
 };
 
 const RATES = [1, 1.25, 1.5, 2];
 
 const stripHtml = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
-export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd, startEp, startTime }: Props) {
+/** @brief 展示可续播的剧集流与资料面板。@param props 来源列表、可见状态和恢复位置。@return 播放界面。 */
+export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd, startEp, startTime, navigationKey = "home" }: Props) {
   const store = useStore();
-  const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen } = store;
+  const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen, rememberVideo, rememberPlayback } = store;
   const isDesktop = !isMobile;
 
   const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<VideoHandle>(null);
   const [index, setIndex] = useState(startIndex);
-  const [epMap, setEpMap] = useState<Record<number, number>>(() => (startEp ? { [videoIds[startIndex]]: startEp } : {}));
+  const [initialProgress] = useState(() => store.history.find((entry) => entry.id === videoIds[startIndex]));
+  const initialEp = startEp || initialProgress?.ep || 1;
+  const initialTime = startTime ?? (initialProgress?.ep === initialEp ? initialProgress.t : 0);
+  const [epMap, setEpMap] = useState<Record<number, number>>(() => ({ [videoIds[startIndex]]: initialEp }));
   const [details, setDetails] = useState<Record<number, Detail>>({});
+  const detailsRef = useRef(details);
+  const [metadataError, setMetadataError] = useState("");
+  const [metadataRevision, setMetadataRevision] = useState(0);
   const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
   const [playRevision, setPlayRevision] = useState(0);
   const [sourceAutoplay, setSourceAutoplay] = useState(true);
@@ -64,7 +73,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [descOpen, setDescOpen] = useState(false);
   /* 续播：拿到时长后再 seek 一次（只对进入时那一条生效） */
   const resumeRef = useRef<{ key: string; t: number } | null>(
-    startTime && startTime > 1 ? { key: `${videoIds[startIndex]}:${startEp || 1}`, t: startTime } : null,
+    initialTime && initialTime > 1 ? { key: `${videoIds[startIndex]}:${initialEp}`, t: initialTime } : null,
   );
   /* 观看进度：onTime 里节流写回 store，卸载时再兜一次 */
   const liveRef = useRef({ id: 0, ep: 1, dur: 0, t: 0 });
@@ -110,10 +119,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   } | null>(null);
 
   const curId = videoIds[index];
-  const detail = details[curId];
+  const detail = details[curId] || store.library[curId];
   const curEp = epMap[curId] || 1;
   const playKey = `${curId}:${curEp}`;
   const playUrl = playUrls[playKey] || "";
+  useEffect(() => {
+    if (!isNative && active && kind === "video" && curId) rememberPlayback(curId, curEp, navigationKey);
+  }, [active, kind, curId, curEp, navigationKey, rememberPlayback]);
   /** @brief 为当前集重新取址并保存续播位置。@param reason 重试或恢复来源。@return 无。 */
   const renewPlayback = useCallback((reason: "error" | "manual" | "resume") => {
     const position = videoRef.current?.el()?.currentTime || liveRef.current.t;
@@ -148,7 +160,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     liveRef.current = { id: curId, ep: curEp, dur: duration, t };
     setTime(t);
     const now = Date.now();
-    if (duration > 0 && now - lastSaveRef.current > 5000) {
+    if (active && duration > 0 && now - lastSaveRef.current > 5000) {
       lastSaveRef.current = now;
       addHistory(curId, curEp, t, duration);
     }
@@ -240,17 +252,25 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* 拉详情（当前 + 邻接预取） */
+  /* 使用稳定的 ID 依赖；进度写入和父组件重渲染不取消正在进行的请求。 */
+  const nearbyIds = [videoIds[index], videoIds[index + 1], videoIds[index - 1]].filter(Boolean).join(",");
   useEffect(() => {
+    if (!active || kind !== "video") return;
     let alive = true;
-    const need = [videoIds[index], videoIds[index + 1], videoIds[index - 1]].filter(Boolean);
+    setMetadataError("");
+    const need = nearbyIds.split(",").map(Number).filter(Boolean);
     need.forEach((id) => {
-      if (details[id]) return;
-      api.video(id).then((d) => { if (alive) setDetails((m) => ({ ...m, [id]: d })); }).catch(() => {});
+      if (!metadataRevision && detailsRef.current[id]) return;
+      api.video(id).then((d) => {
+        if (!alive) return;
+        if (!d?.id || !d.title) throw new Error("剧集资料暂不可用");
+        detailsRef.current = { ...detailsRef.current, [id]: d };
+        setDetails(detailsRef.current);
+        rememberVideo(d);
+      }).catch(() => { if (alive && id === curId) setMetadataError("剧集资料暂不可用"); });
     });
     return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, videoIds]);
+  }, [active, kind, curId, nearbyIds, metadataRevision, rememberVideo]);
 
   /* 吃瓜帖子：直接拿帖子详情（含 video_url） */
   useEffect(() => {
@@ -283,6 +303,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   /* 切换条目/集数时重置播放状态 */
   useEffect(() => {
+    const previous = liveRef.current;
+    if (active && previous.id && previous.dur) addHistory(previous.id, previous.ep, previous.t, previous.dur);
+    liveRef.current = { id: curId, ep: curEp, dur: 0, t: 0 };
     setTime(0); setDuration(0); setBuffered(0); setErr(""); setWaiting(true); setPaused(false); setDescOpen(false);
     setVsize({ w: 0, h: 0 });
     retryState.current = { key: playKey, attempts: 0 };
@@ -296,12 +319,18 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   /* 倍速同步（长按 2x / 锁定 2x / 基准倍速） */
   useEffect(() => { videoRef.current?.rate(effRate); }, [effRate, playKey]);
 
-  /* 离开播放页时把最后位置落盘 */
-  useEffect(() => () => {
-    const s = liveRef.current;
-    if (s.id && s.dur) addHistory(s.id, s.ep, s.t, s.dur);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  /* 刷新、进入后台和退出时同步保存，避免最后五秒丢失。 */
+  useEffect(() => {
+    if (!active) return;
+    const save = () => {
+      const s = liveRef.current;
+      if (s.id && s.dur) addHistory(s.id, s.ep, s.t, s.dur);
+    };
+    const hidden = () => { if (document.hidden) save(); };
+    window.addEventListener("pagehide", save);
+    document.addEventListener("visibilitychange", hidden);
+    return () => { save(); window.removeEventListener("pagehide", save); document.removeEventListener("visibilitychange", hidden); };
+  }, [active, addHistory]);
 
   /* 键盘 */
   useEffect(() => {
@@ -550,6 +579,51 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     return base + (isLiked(curId) ? 1 : 0);
   }, [meta.like, curId, isLiked]);
 
+  const detailsPanel = (
+    <section aria-label="博主信息" className="h-full scroll-y px-4 pb-5">
+      {/* 封面 / 标题 / 评分 / 数据 */}
+      <div className="flex gap-3">
+        <div className="relative w-[84px] shrink-0 rounded-(--r-sm) overflow-hidden bg-s3" style={{ aspectRatio: "3 / 4" }}>
+          <Img src={meta.cover} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[13.5px] font-bold text-on leading-snug clamp-2">{meta.title}</div>
+          <div className="flex items-center gap-2 mt-1.5">
+            {!!meta.score && <span className="text-[12px] font-bold text-amber">{meta.score.toFixed(1)} 分</span>}
+            {episodes.length > 0 && <span className="text-[10.5px] text-mut">共 {episodes.length} 集</span>}
+          </div>
+          <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
+            <span>点赞 {fmt(meta.like)}</span>
+            <span>收藏 {fmt(meta.collect)}</span>
+            <span>评论 {fmt(meta.comment)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 作者 + 关注 */}
+      <div className="mt-4 flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-2.5">
+        <Avatar size={34} name={meta.author} hue={220} />
+        <div className="flex-1 min-w-0">
+          <div className="text-[12.5px] font-semibold text-on truncate">{meta.author}</div>
+          <div className="text-[10px] text-mut">博主{detail?.author?.followers != null ? ` · ${fmt(detail.author.followers)} 粉丝` : ""}</div>
+        </div>
+        {meta.authorId > 0 && (
+          <button onClick={onFollow}
+            className={`h-7 px-3 rounded-full text-[11px] font-semibold pressable ${store.follows.includes(meta.authorId) ? "bg-s3 text-mut" : "bg-primary text-on-primary"}`}>
+            {store.follows.includes(meta.authorId) ? "已关注" : "+ 关注"}
+          </button>
+        )}
+      </div>
+
+      {kind === "video" && <button onClick={() => setPanel("episodes")} aria-label="选集" className="mt-4 w-full h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-on pressable">选集 · 第 {curEp} / {episodes.length || "—"} 集<IChevR size={13} className="inline ml-1" /></button>}
+      {/* 简介 */}
+      <div className="mt-4">
+        <div className="text-[11px] font-semibold text-dim mb-1.5">简介</div>
+        <p className="text-[11.5px] leading-relaxed text-mut whitespace-pre-wrap">{meta.desc || "暂无简介"}</p>
+      </div>
+    </section>
+  );
+
   if (!videoIds.length) {
     return <div className="absolute inset-0 bg-black flex items-center justify-center"><div className="w-9 h-9 spinner" /></div>;
   }
@@ -570,7 +644,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         {videoIds.map((vid, i) => {
           const isActive = i === index;
           return (
-            <section key={vid} className="relative w-full h-full snap-start snap-always overflow-hidden">
+            <section key={vid} aria-hidden={!isActive} inert={!isActive} className="relative w-full h-full snap-start snap-always overflow-hidden">
               {isActive && playUrl ? (
                 <div className="absolute inset-0" style={{ touchAction: "pan-y" }}
                   onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => onUp()} onPointerCancel={() => onUp(true)} onLostPointerCapture={() => onUp(true)}>
@@ -706,7 +780,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               {!fs && isDesktop && (
               <div className="desktop-video-meta">
                 <div className="flex items-center gap-2">
-                  <span className="text-[15px] font-bold text-white tsh truncate">@{meta.author}</span>
+                  <button onClick={() => setPanel("detail")} aria-label="查看博主信息" className="text-[15px] font-bold text-white tsh truncate pressable">@{meta.author}<IChevR size={13} className="inline ml-1" /></button>
                   {episodes.length > 0 && (
                     <span className="shrink-0 px-1.5 py-px rounded-md text-[10px] font-bold text-white"
                       style={{ background: "rgba(255,255,255,.16)" }}>
@@ -735,12 +809,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                 <div className="absolute inset-x-0 z-20" style={{ bottom: `calc(var(--sab, 0px) + ${bottomInset}px)` }}>
                   <div className="absolute inset-x-0 bottom-0 h-[190px] pointer-events-none"
                     style={{ background: "linear-gradient(0deg, rgba(0,0,0,.82) 0%, rgba(0,0,0,.42) 45%, transparent 100%)" }} />
+                  <button onClick={() => setPanel("detail")} aria-label="查看博主信息" className="relative px-4 pb-1 text-[12px] font-semibold hg-ink hg-ov-shadow pressable">@{meta.author}<IChevR size={12} className="inline ml-1" /></button>
                   <p className="relative px-4 pb-2 text-[14px] font-semibold leading-snug hg-ink hg-ov-shadow clamp-2">{meta.title}</p>
                   <div className="relative pt-1.5 pb-2.5">
-                    <button onClick={() => setPanel("detail")}
+                    <div className="flex items-center"><button onClick={() => setPanel("detail")}
                       className="px-4 flex items-center gap-0.5 text-[10.5px] font-medium hg-ink hg-ov-shadow pressable">
                       详情 · 第 {curEp} 集<IChevR size={11} />
-                    </button>
+                    </button>{kind === "video" && <button onClick={() => setPanel("episodes")} aria-label="选集" className="ml-2 text-[11px] hg-ink hg-ov-shadow pressable">选集 · 共 {episodes.length || "—"} 集<IChevR size={11} className="inline" /></button>}</div>
                     <div ref={barRef} className="mx-4 mt-2 relative" style={{ height: 14, touchAction: "none" }}
                       onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}>
                       <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-[2.5px] rounded-full" style={{ background: "rgba(255,255,255,.3)" }}>
@@ -794,6 +869,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           );
         })}
       </div>
+
+      {metadataError && active && !fs && <div role="status" className="absolute left-4 z-30 rounded-lg px-3 py-2 text-[11px] text-white bg-black/75" style={{ top: mode === "context" ? 65 : 16 }}><span>{metadataError}</span><button onClick={() => setMetadataRevision((value) => value + 1)} className="ml-3 underline" aria-label="重试剧集信息">重试</button></div>}
 
       {/* 桌面控制条 */}
       {isDesktop && (
@@ -893,6 +970,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           <div className="desktop-dock-inner">
             {panel === "episodes" ? (
               <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
+            ) : panel === "detail" ? (
+              <div className="flex flex-col h-full"><div className="flex items-center h-12 px-4 shrink-0"><span className="text-[13.5px] font-bold text-on">剧集与博主</span><button onClick={() => setPanel(null)} aria-label="关闭" className="ml-auto w-8 h-8 text-mut flex items-center justify-center"><IClose size={14} /></button></div><div className="flex-1 min-h-0">{detailsPanel}</div></div>
             ) : panel === "comments" ? (
               <CommentsPanel videoId={curId} ep={curEp} total={meta.comment} kind={kind} onClose={() => setPanel(null)} />
             ) : null}
@@ -935,47 +1014,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                 {panel === "episodes" ? (
                   <EpisodesPanel bare videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
                 ) : (
-                  <div className="h-full scroll-y px-4 pb-5">
-                    {/* 封面 / 标题 / 评分 / 数据 */}
-                    <div className="flex gap-3">
-                      <div className="relative w-[84px] shrink-0 rounded-(--r-sm) overflow-hidden bg-s3" style={{ aspectRatio: "3 / 4" }}>
-                        <Img src={meta.cover} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[13.5px] font-bold text-on leading-snug clamp-2">{meta.title}</div>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          {!!meta.score && <span className="text-[12px] font-bold text-amber">{meta.score.toFixed(1)} 分</span>}
-                          {episodes.length > 0 && <span className="text-[10.5px] text-mut">共 {episodes.length} 集</span>}
-                        </div>
-                        <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
-                          <span>点赞 {fmt(meta.like)}</span>
-                          <span>收藏 {fmt(meta.collect)}</span>
-                          <span>评论 {fmt(meta.comment)}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 作者 + 关注 */}
-                    <div className="mt-4 flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-2.5">
-                      <Avatar size={34} name={meta.author} hue={220} />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[12.5px] font-semibold text-on truncate">{meta.author}</div>
-                        <div className="text-[10px] text-mut">作者</div>
-                      </div>
-                      {meta.authorId > 0 && (
-                        <button onClick={onFollow}
-                          className={`h-7 px-3 rounded-full text-[11px] font-semibold pressable ${store.follows.includes(meta.authorId) ? "bg-s3 text-mut" : "bg-primary text-on-primary"}`}>
-                          {store.follows.includes(meta.authorId) ? "已关注" : "+ 关注"}
-                        </button>
-                      )}
-                    </div>
-
-                    {/* 简介 */}
-                    <div className="mt-4">
-                      <div className="text-[11px] font-semibold text-dim mb-1.5">简介</div>
-                      <p className="text-[11.5px] leading-relaxed text-mut whitespace-pre-wrap">{meta.desc || "暂无简介"}</p>
-                    </div>
-                  </div>
+                  detailsPanel
                 )}
               </div>
             </div>

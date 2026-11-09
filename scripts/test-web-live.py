@@ -1,9 +1,10 @@
 """@brief 只记录技术状态的实机播放验收，不保存画面、标题、地址或凭据。"""
 import json
 import os
+import re
 import time
 from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeout
+from playwright.sync_api import expect, sync_playwright, TimeoutError as BrowserTimeout
 
 ORIGIN = os.environ.get("HGHUB_TEST_URL", "http://127.0.0.1:18093")
 
@@ -48,10 +49,36 @@ def main():
             target = min(12, initial["duration"] / 2)
             page.evaluate("target => { const v=document.querySelector('video'); v.currentTime=target; void v.play(); }", target)
             sought = wait_video(page, target + 0.5)
+            # 全新隔离浏览器中的本次测试记录；不读取用户浏览器数据或导出实际内容。
+            author=page.get_by_role("button",name="查看博主信息",exact=True)
+            expect(author).to_be_visible()
+            author.click()
+            expect(page.get_by_role("region",name="博主信息")).to_be_visible()
+            page.get_by_role("button",name="选集",exact=True).last.click()
+            episode_buttons=page.get_by_role("button",name=re.compile(r"^第 \d+ 集$"))
+            expect(episode_buttons.first).to_be_visible()
+            episode_count=episode_buttons.count()
+            pick=episode_buttons.nth(1 if episode_count>1 else 0)
+            selected_episode=pick.get_attribute("aria-label")
+            pick.click();wait_video(page,0.5)
+            page.reload(wait_until="domcontentloaded")
+            refreshed=wait_video(page,0.5)
+            expect(page.get_by_role("button",name="查看博主信息",exact=True)).to_be_visible()
+            page.get_by_role("button",name="选集",exact=True).last.click()
+            expect(page.get_by_role("button",name=selected_episode,exact=True)).to_have_attribute("aria-pressed","true")
+            assert episode_buttons.count()==episode_count
+            page.get_by_role("button",name=selected_episode,exact=True).click()
+            page.get_by_role("button",name="返回",exact=True).click()
+            page.get_by_role("button",name="我的",exact=True).click()
+            page.get_by_role("button",name="观看历史",exact=True).last.click()
+            expect(page.get_by_role("button",name=re.compile("^继续观看")).first).to_be_visible()
+            page.reload(wait_until="domcontentloaded")
+            expect(page.get_by_role("button",name=re.compile("^继续观看")).first).to_be_visible()
             assert hosts == {urlparse(ORIGIN).netloc}, "Media request escaped the local service"
             assert not errors, errors
             report.append({"mobile":mobile,"initial":initial,"after_seek":sought,"page_errors":errors,
-                           "all_http_requests_same_origin":True,"media_response_count":len(media_statuses),
+                           "all_http_requests_same_origin":True,"episode_count":episode_count,"author_and_history_visible":True,
+                           "episode_survives_refresh":True,"after_refresh":refreshed,"media_response_count":len(media_statuses),
                            "media_error_statuses":[status for status in media_statuses if status>=400]})
             context.close()
         browser.close()

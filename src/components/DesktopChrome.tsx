@@ -5,7 +5,7 @@ import { APP_VERSION } from "../api";
 import { isNative } from "../runtime";
 import { Avatar } from "./ui";
 import {
-  IClose, IGrid, IGridF, IHome, IHomeF, IMinus, IMoon, IRestore, ISearch, ISettings, ISidebar,
+  IClock, IClose, IGrid, IGridF, IHome, IHomeF, IMinus, IMoon, IRestore, ISearch, ISettings, ISidebar,
   ISquare, ISun, ITrophy, IUser, IUserF, Logo,
 } from "../icons";
 
@@ -62,7 +62,7 @@ export function DesktopTitleBar({ collapsed, onToggle }: { collapsed: boolean; o
 }
 
 export function DesktopRail({ collapsed }: { collapsed: boolean }) {
-  const { tab, setTab, user, setLoginOpen, push, platform, stack } = useStore();
+  const { tab, setTab, user, setLoginOpen, push, platform, stack, libraryTab, setLibraryTab } = useStore();
   /* 从侧栏进入的栈页（排行榜 / 设置）接管高亮，否则「我的」会一直亮着，看起来不像独立页面 */
   const top = stack[stack.length - 1];
   const railPage: "ranks" | "settings" | null =
@@ -84,13 +84,18 @@ export function DesktopRail({ collapsed }: { collapsed: boolean }) {
         </button>
         <div className="win-nav-items">
           {items.map(({ key, label, Icon, Filled }) => (
-            <button key={key} aria-current={onTab(key) ? "page" : undefined}
-              className={`win-nav-item ${onTab(key) ? "is-selected" : ""}`}
+            <button key={key} aria-current={onTab(key) && !(key === "profile" && libraryTab === "history") ? "page" : undefined}
+              className={`win-nav-item ${onTab(key) && !(key === "profile" && libraryTab === "history") ? "is-selected" : ""}`}
               onClick={() => setTab(key)}>
               <span className="win-nav-symbol">{onTab(key) ? <Filled size={21} /> : <Icon size={21} strokeWidth={1.7} />}</span>
               <span className="win-nav-copy">{label}</span>
             </button>
           ))}
+          <button className={`win-nav-item ${onTab("profile") && libraryTab === "history" ? "is-selected" : ""}`}
+            onClick={() => { setLibraryTab("history"); setTab("profile"); }} aria-label="观看历史">
+            <span className="win-nav-symbol"><IClock size={21} strokeWidth={1.7} /></span>
+            <span className="win-nav-copy">观看历史</span>
+          </button>
           <button className={`win-nav-item ${railPage === "ranks" ? "is-selected" : ""}`}
             aria-current={railPage === "ranks" ? "page" : undefined}
             onClick={() => { if (railPage !== "ranks") push({ kind: "ranks" }); }}>
