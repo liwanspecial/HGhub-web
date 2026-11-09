@@ -46,6 +46,9 @@ HGHUB_STRICT=1 src-web/target/release/hghub-web
 生产使用独立 systemd 用户服务，入口指向已提交源码构建的版本目录。
 运行目录和日志必须在 Git 外，部署时记录源码 commit、二进制及前端 SHA256。
 服务使用 Restart=on-failure、资源上限、NoNewPrivileges 和只读系统沙箱。
+当前树莓派内核未提供 memory cgroup 控制器，MemoryMax 属于备用配置；
+另用 LimitAS=768M 限制进程虚拟地址空间，MALLOC_ARENA_MAX=2 限制分配器 arena。
+没有修改启动参数或重启树莓派。
 更换 current 符号链接后仅重启 hghub-web；回退指向保留的上一版本。
 
 ## 接口

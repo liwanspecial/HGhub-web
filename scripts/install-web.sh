@@ -33,6 +33,7 @@ Environment=HGHUB_DIST=$task_base/current/dist
 Environment=HGHUB_DATA=$task_base/state
 Environment=HGHUB_STRICT=1
 Environment=HGHUB_PROXY=http://127.0.0.1:7897
+Environment=MALLOC_ARENA_MAX=2
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
@@ -45,6 +46,7 @@ ReadWritePaths=$task_base/state
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryMax=384M
+LimitAS=768M
 TasksMax=128
 CPUQuota=100%
 
