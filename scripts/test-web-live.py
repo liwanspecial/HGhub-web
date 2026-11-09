@@ -3,10 +3,19 @@ import json
 import os
 import re
 import time
+import traceback
 from urllib.parse import urlparse
 from playwright.sync_api import expect, sync_playwright, TimeoutError as BrowserTimeout
 
 ORIGIN = os.environ.get("HGHUB_TEST_URL", "http://127.0.0.1:18093")
+STEP = "initialize"
+
+
+def wake_controls(page, mobile):
+    """@brief 唤醒桌面闲置隐藏的控件。@param page 页面。@param mobile 手机布局。@return 无。"""
+    if not mobile:
+        page.mouse.move(280, 110)
+        page.mouse.move(320, 140)
 
 
 def wait_video(page, target):
@@ -26,10 +35,12 @@ def wait_video(page, target):
 
 def main():
     """@brief 验证桌面与手机布局下的真实视频解码及跳转。@return 无；失败抛异常。"""
+    global STEP
     report = []
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="msedge", headless=True, args=["--autoplay-policy=no-user-gesture-required"])
         for mobile in (False, True):
+            STEP = "mobile initial playback" if mobile else "desktop initial playback"
             context = browser.new_context(viewport={"width":390 if mobile else 1280,"height":844 if mobile else 800},
                 is_mobile=mobile, has_touch=mobile,
                 user_agent="Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36" if mobile else None)
@@ -49,6 +60,8 @@ def main():
             target = min(12, initial["duration"] / 2)
             page.evaluate("target => { const v=document.querySelector('video'); v.currentTime=target; void v.play(); }", target)
             sought = wait_video(page, target + 0.5)
+            STEP = "author and episode selection"
+            wake_controls(page, mobile)
             # 全新隔离浏览器中的本次测试记录；不读取用户浏览器数据或导出实际内容。
             author=page.get_by_role("button",name="查看博主信息",exact=True)
             expect(author).to_be_visible()
@@ -61,13 +74,16 @@ def main():
             pick=episode_buttons.nth(1 if episode_count>1 else 0)
             selected_episode=pick.get_attribute("aria-label")
             pick.click();wait_video(page,0.5)
+            STEP = "reload selected episode"
             page.reload(wait_until="domcontentloaded")
             refreshed=wait_video(page,0.5)
+            wake_controls(page, mobile)
             expect(page.get_by_role("button",name="查看博主信息",exact=True)).to_be_visible()
             page.get_by_role("button",name="选集",exact=True).last.click()
             expect(page.get_by_role("button",name=selected_episode,exact=True)).to_have_attribute("aria-pressed","true")
             assert episode_buttons.count()==episode_count
             page.get_by_role("button",name=selected_episode,exact=True).click()
+            STEP = "history navigation and reload"
             page.get_by_role("button",name="返回",exact=True).click()
             page.get_by_role("button",name="我的",exact=True).click()
             page.get_by_role("button",name="观看历史",exact=True).last.click()
@@ -90,4 +106,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        # Playwright 的原始异常可能包含 DOM、封面签名或媒体地址，只输出技术位置。
+        print(json.dumps({"error":type(error).__name__,"step":STEP,
+                          "locations":[{"function":frame.name,"line":frame.lineno}
+                                       for frame in traceback.extract_tb(error.__traceback__) if frame.filename==__file__]}))
+        raise SystemExit(1)
