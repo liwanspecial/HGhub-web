@@ -31,6 +31,10 @@ def main():
             page = context.new_page()
             errors = []
             commands = []
+            play_requests = [0]
+            expire_first = os.environ.get("HGHUB_TEST_EXPIRED") == "1"
+            expired_ticket = [None]
+            requests_at_expiry = [0]
             page.on("pageerror", lambda error: errors.append(str(error)))
 
             def api(route):
@@ -51,16 +55,25 @@ def main():
                 elif command == "api_video":
                     data = DETAIL
                 elif command == "api_play":
-                    data = {"id": 123, "ep_num": 1, "title": CARD["title"], "duration": 90, "video_url": "https://media.example.test/list.m3u8"}
+                    play_requests[0] += 1
+                    data = {"id": 123, "ep_num": 1, "title": CARD["title"], "duration": 90,
+                            "video_url": f"{ORIGIN}/media/hls?p=test-ticket-{play_requests[0]}&r=test-manifest"}
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"data": data}))
 
             def media(route):
                 parsed = urlparse(route.request.url)
-                target = parse_qs(parsed.query).get("u", [""])[0]
-                name = Path(urlparse(target).path).name
+                query = parse_qs(parsed.query)
+                assert "u" not in query, "Local playback ticket must not be wrapped as an upstream URL"
+                if expire_first and expired_ticket[0] is None:
+                    expired_ticket[0] = query.get("p")
+                    requests_at_expiry[0] = play_requests[0]
+                if expire_first and query.get("p") == expired_ticket[0]:
+                    route.fulfill(status=410, content_type="application/json", body='{"error":"test-expired-ticket"}')
+                    return
+                name = query.get("r", [""])[0]
                 if parsed.path.endswith("/hls") or name.endswith(".m3u8"):
                     manifest = (MEDIA / "list.m3u8").read_text()
-                    lines = [line if not line or line.startswith("#") else f"{ORIGIN}/media/seg?u={quote('https://media.example.test/' + line, safe='')}" for line in manifest.splitlines()]
+                    lines = [line if not line or line.startswith("#") else f"{ORIGIN}/media/seg?p={query['p'][0]}&r={line}" for line in manifest.splitlines()]
                     route.fulfill(status=200, content_type="application/vnd.apple.mpegurl", body="\n".join(lines) + "\n")
                 else:
                     assert name.startswith("seg") and name.endswith(".ts")
@@ -83,6 +96,8 @@ def main():
                 assert time.monotonic() < deadline, "Synthetic video did not start"
                 page.wait_for_timeout(200)
             assert not errors, errors
+            if expire_first:
+                assert play_requests[0] == requests_at_expiry[0] + 1, "Expired ticket must trigger exactly one new playback request"
             page.screenshot(path=str(OUTPUT / ("mobile.png" if mobile else "desktop.png")), full_page=True)
             report.append({"mobile": mobile, "passed": True, "http_commands": sorted(set(commands)), "errors": errors})
             context.close()

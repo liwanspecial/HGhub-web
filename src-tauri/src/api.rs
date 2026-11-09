@@ -27,6 +27,14 @@ impl Api {
         edge(&origin, "GET", path, None, token.as_deref()).await
     }
 
+    /// @brief 为当前身份发送 POST 边缘信封。@param path 业务路径。
+    /// @param body 业务正文。@return 上游数据或授权、连接错误。
+    async fn post(&self, path: &str, body: Option<Value>) -> Result<Value, String> {
+        let origin = base();
+        let token = self.session.token(&origin);
+        edge(&origin, "POST", path, body, token.as_deref()).await
+    }
+
     async fn authed(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
         let origin = base();
         let token = self
@@ -362,9 +370,12 @@ pub async fn api_video(state: State<'_, Api>, id: i64) -> Result<Value, String> 
 }
 
 #[cfg_attr(feature = "native", tauri::command)]
+/// @brief 按当前身份申请当前集的短期播放凭据，不复用旧 GET 返回的空地址。
+/// @param state 业务会话。@param id 剧集编号。@param ep 集数。
+/// @return 含 streams 和 CDN 配置的内存凭据，或上游错误。
 pub async fn api_play(state: State<'_, Api>, id: i64, ep: u32) -> Result<Value, String> {
     state
-        .get(&format!("/api/videos/{id}/play?ep={ep}&page_texts=0"))
+        .post(&format!("/api/videos/{id}/episodes/{ep}/playback"), Some(json!({})))
         .await
 }
 

@@ -33,7 +33,7 @@ export const cover = (url?: string, _w = 480) =>
   url ? `${LOCAL}/img?u=${encodeURIComponent(url)}` : "";
 
 /** 播放列表：经本地协议改写分片地址，规避 CORS 与防盗链。 */
-export const playlist = (url: string) => `${LOCAL}/hls?u=${encodeURIComponent(url)}`;
+export const playlist = (url: string) => isLocalMedia(url) ? url : `${LOCAL}/hls?u=${encodeURIComponent(url)}`;
 
 /* ── 调用封装 ───────────────────────────────────────────── */
 
@@ -146,7 +146,7 @@ export async function selfTest(): Promise<string> {
   try {
     const info = await api.play(117, 3);
     steps.push(`play:${info?.video_url ? "ok" : "empty"}`);
-    const hlsUrl = `${LOCAL}/hls?u=${encodeURIComponent(info.video_url)}`;
+    const hlsUrl = playlist(info.video_url);
     const r1 = await fetch(hlsUrl);
     const txt = await r1.text();
     steps.push(`hls:${r1.status}/${txt.length}/${txt.startsWith("#EXTM3U") ? "m3u8" : "bad"}`);
@@ -211,10 +211,12 @@ export const dur = (s?: number | string) => {
 
 /** 非 m3u8 媒体（mp4 等）走 /seg 原样透传 */
 export function directMedia(url: string): string {
+  if (isLocalMedia(url)) return url;
   return `${LOCAL}/seg?u=${encodeURIComponent(url)}`;
 }
 
 /** 按扩展名选择代理方式：m3u8 → 播放列表改写；其它 → 原样透传 */
 export function mediaUrl(url: string): string {
+  if (isLocalMedia(url)) return url;
   return /\.m3u8(\?|$)/i.test(url) ? playlist(url) : directMedia(url);
 }

@@ -11,6 +11,7 @@ mod media;
 mod net;
 #[path = "../../src-tauri/src/network_policy.rs"]
 mod network_policy;
+mod playback;
 #[path = "../../src-tauri/src/playback_log.rs"]
 mod playback_log;
 #[path = "../../src-tauri/src/session.rs"]
@@ -46,6 +47,7 @@ pub struct Config {
 }
 struct BrowserSession {
     api: Arc<api::Api>,
+    playback: Arc<playback::TicketStore>,
     touched: Instant,
 }
 struct WebState {
@@ -159,29 +161,32 @@ async fn guard(State(state): State<Arc<WebState>>, mut request: Request, next: N
                 .find_map(|(k, v)| (k == COOKIE).then_some(v.to_owned()))
         });
     let now = Instant::now();
-    let (api, issued) = {
+    let (api, playback, issued) = {
         let mut sessions = state.sessions.lock().unwrap();
         sessions.retain(|_, session| now.duration_since(session.touched) < SESSION_TTL);
         if let Some(session) = supplied.as_ref().and_then(|id| sessions.get_mut(id)) {
             session.touched = now;
-            (session.api.clone(), None)
+            (session.api.clone(), session.playback.clone(), None)
         } else {
             if sessions.len() >= 128 {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
             let id = uuid::Uuid::new_v4().simple().to_string();
             let api = Arc::new(api::Api::new());
+            let playback = Arc::new(playback::TicketStore::default());
             sessions.insert(
                 id.clone(),
                 BrowserSession {
                     api: api.clone(),
+                    playback: playback.clone(),
                     touched: now,
                 },
             );
-            (api, Some(id))
+            (api, playback, Some(id))
         }
     };
     request.extensions_mut().insert(api);
+    request.extensions_mut().insert(playback);
     let mut response = next.run(request).await;
     if let Some(id) = issued {
         response.headers_mut().insert(
@@ -217,6 +222,8 @@ struct Command {
 async fn invoke(
     State(state): State<Arc<WebState>>,
     Extension(api): Extension<Arc<api::Api>>,
+    Extension(playback): Extension<Arc<playback::TicketStore>>,
+    headers: HeaderMap,
     Json(command): Json<Command>,
 ) -> Result<Json<Value>, WebError> {
     let _permit = state.requests.try_acquire().map_err(|_| {
@@ -225,14 +232,24 @@ async fn invoke(
             "请求较多，请稍后重试".into(),
         )
     })?;
-    let result = tokio::time::timeout(Duration::from_secs(80), dispatch(&api, command))
-        .await
-        .map_err(|_| {
-            WebError(
-                StatusCode::GATEWAY_TIMEOUT,
-                "上游响应超时，请稍后重试".into(),
-            )
-        })??;
+    let prefix = format!(
+        "http://{}/media",
+        headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(80),
+        dispatch(&api, &playback, &prefix, command),
+    )
+    .await
+    .map_err(|_| {
+        WebError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "上游响应超时，请稍后重试".into(),
+        )
+    })??;
     Ok(Json(json!({"data": result})))
 }
 /// @brief 读取强类型参数。@param args 参数对象。@param name 字段名。@return 参数或错误。
@@ -259,7 +276,12 @@ fn text(args: &Value, name: &str, limit: usize) -> Result<String, WebError> {
     Ok(value)
 }
 /// @brief 分派白名单命令。@param api 会话业务状态。@param request 命令。@return 业务结果。
-async fn dispatch(api: &api::Api, request: Command) -> Result<Value, WebError> {
+async fn dispatch(
+    api: &api::Api,
+    playback: &playback::TicketStore,
+    prefix: &str,
+    request: Command,
+) -> Result<Value, WebError> {
     let a = request.args;
     let page = || positive(&a, "page", 10000).map(|v| v as u32);
     let size = || positive(&a, "size", 50).map(|v| v as u32);
@@ -279,7 +301,7 @@ async fn dispatch(api: &api::Api, request: Command) -> Result<Value, WebError> {
         "api_posts" => api::api_posts(api, page()?, size()?).await?,
         "api_post" => api::api_post(api, id()?).await?,
         "api_video" => api::api_video(api, id()?).await?,
-        "api_play" => api::api_play(api, id()?, ep()?).await?,
+        "api_play" => playback.prepare(api, id()?, ep()?, prefix).await?,
         "api_comments" => api::api_comments(api, id()?, ep()?, page()?, size()?).await?,
         "api_post_comments" => api::api_post_comments(api, id()?, page()?, size()?).await?,
         "api_login" => {
@@ -357,12 +379,38 @@ async fn dispatch(api: &api::Api, request: Command) -> Result<Value, WebError> {
 /// @brief 校验并转发媒体。@param route 媒体路由。@param query 目标参数。
 /// @param headers 请求标头。@return 同源播放列表、封面或流式响应。
 async fn media_request(
+    Extension(api): Extension<Arc<api::Api>>,
+    Extension(playback): Extension<Arc<playback::TicketStore>>,
     Path(route): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, WebError> {
     if !["img", "hls", "seg"].contains(&route.as_str()) {
         return Err(WebError(StatusCode::NOT_FOUND, "媒体路径无效".into()));
+    }
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    if range.is_some_and(|value| {
+        value.len() > 100
+            || !value.starts_with("bytes=")
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b"bytes=,- ".contains(&b))
+    }) {
+        return Err(bad("Range 参数无效"));
+    }
+    if query.contains_key("p") || query.contains_key("r") {
+        let ticket = query
+            .get("p")
+            .filter(|v| v.len() == 32)
+            .ok_or_else(|| bad("播放票据无效"))?;
+        let resource = query
+            .get("r")
+            .filter(|v| v.len() == 32)
+            .ok_or_else(|| bad("播放资源无效"))?;
+        return playback
+            .serve(&api, ticket, resource, range)
+            .await
+            .map_err(|error| WebError(StatusCode::GONE, error));
     }
     let target = query
         .get("u")

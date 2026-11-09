@@ -228,17 +228,30 @@ pub async fn get_with_range(
     referer: Option<&str>,
     range: Option<&str>,
 ) -> Result<reqwest::Response, String> {
+    get_with_headers(raw, timeout, accept, referer, range, &http::HeaderMap::new()).await
+}
+
+/// @brief 转发经过校验的媒体标头，跨源重定向不携带凭据。
+/// @param raw 目标地址。@param timeout 超时。@param accept 可选 Accept。
+/// @param referer 可选来源。@param range 可选 Range。@param headers 限定 CDN 标头。
+/// @return 上游响应或网络策略错误。
+pub async fn get_with_headers(
+    raw: &str, timeout: Duration, accept: Option<&str>, referer: Option<&str>,
+    range: Option<&str>, headers: &http::HeaderMap,
+) -> Result<reqwest::Response, String> {
     tokio::time::timeout(timeout, async {
         let policy_error = |phase: &str, error: String| {
             crate::playback_log::record("network.target_failed", json!({"resource": crate::playback_log::resource_id(raw), "phase": phase, "error_kind": crate::playback_log::error_kind(&error)}));
             error
         };
         let mut next = network_policy::parse_target(raw).map_err(|e| policy_error("parse", e))?;
+        let credential_origin = next.origin();
         for hop in 0..=5 {
             let resolving = Instant::now();
             let (target, http) = client_for(next.as_str()).await.map_err(|e| policy_error("dns_or_client", e))?;
             crate::playback_log::record("network.target_ready", json!({"resource": crate::playback_log::resource_id(raw), "target_resource": crate::playback_log::resource_id(target.as_str()), "dns_or_client_ms": resolving.elapsed().as_millis() as u64, "hop": hop}));
             let mut request = http.get(target.clone()).timeout(timeout);
+            if target.origin() == credential_origin { request = request.headers(headers.clone()); }
             if let Some(value) = range {
                 request = request.header("Range", value);
             }

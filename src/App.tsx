@@ -267,7 +267,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
+    if (!import.meta.env.DEV || !isNative) return;
     const t = window.setTimeout(() => {
       selfTest().then((r) => { invoke("debug_log", { msg: r }).catch(() => {}); }).catch(() => {});
     }, 2500);
