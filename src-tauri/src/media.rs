@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tauri::http::{Response, StatusCode};
+use http::{Response, StatusCode};
 
 /// 本平台自定义协议的完整基址。
 ///

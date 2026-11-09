@@ -4,5 +4,7 @@
 <title>HGhub HTML security regression</title>
 <pre id="results">Running…</pre>
 <div id="fixture"></div>
+<!-- Native fixtures initialize their host before module evaluation. -->
+<script>window.__TAURI_INTERNALS__ = { invoke: () => Promise.resolve(null) };</script>
 <script type="module" src="./html-security.ts"></script>
 </html>

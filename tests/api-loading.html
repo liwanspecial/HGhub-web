@@ -1,2 +1,4 @@
 <!doctype html><meta charset="utf-8"><div id="root"></div>
+<!-- Native fixtures initialize their host before module evaluation. -->
+<script>window.__TAURI_INTERNALS__ = { invoke: () => Promise.resolve(null) };</script>
 <script type="module" src="/tests/api-loading.tsx"></script>

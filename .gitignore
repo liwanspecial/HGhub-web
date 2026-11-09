@@ -8,6 +8,11 @@ dist-ssr/
 test-results/
 src-tauri/target/
 src-tauri/gen/
+src-web/target/
+.web-data/
+*.tar.gz
+__pycache__/
+*.pyc
 *.local
 
 # 编辑器 / 系统
